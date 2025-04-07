@@ -31,7 +31,7 @@ def load_and_process_spectra(G4monomer, G4aggregate):
     return wn_abs, exp_spec_mon, exp_spec_agg
 
 
-def generate_lattice(nWidth, nLength, nHeight, aDist, bDist, molHeight):
+def generate_lattice(nWidth, nLength, nHeight, aDist, bDist, molHeight, posVecDisorder=True):
     # Number of monomers in the aggregate structure
     nMonomers = nWidth * nLength * nHeight
     
@@ -60,11 +60,17 @@ def generate_lattice(nWidth, nLength, nHeight, aDist, bDist, molHeight):
         posVec[1, ss:ss + nLayer] = posVec[1, :nLayer]
         zInd = (ss + nLayer - 1) // nLayer - 1
         posVec[2, ss:ss + nLayer] = zInd * molHeight
+        
+    if posVecDisorder==True:
+        disorder_std = 0.3  # in angstroms
+        posVec = posVec + np.random.normal(0, disorder_std, size=posVec.shape)
+    else:
+        pass    
 
     return posVec
 
 
-def compute_theta_matrix(posVec, nMonomers, nEvals):
+def compute_theta_matrix(posVec, nMonomers, nEvals, thetaVecDisorder=True):
     # Creates matrix of theta TDM relative angle inputs.
     # Indices: [molecule #, molecule #, Bx/y TDM]
     thetaVals = np.zeros((nMonomers, nMonomers, nEvals))
@@ -80,6 +86,15 @@ def compute_theta_matrix(posVec, nMonomers, nEvals):
             # Saves the angle values as matrix entries
             thetaVals[mm, nn, 0] = theta_Bx
             thetaVals[mm, nn, 1] = theta_By
+            
+    if thetaVecDisorder==True:
+        # Add Gaussian angular noise with std deviation of 5 degrees (~0.087 rad)
+        angle_disorder_deg = 10
+        angle_disorder_rad = np.deg2rad(angle_disorder_deg)
+        thetaVals = thetaVals + np.random.normal(0, angle_disorder_rad, size=thetaVals.shape)
+    else:
+        pass
+        
     return np.nan_to_num(thetaVals)
 
 
@@ -314,13 +329,14 @@ def main():
     gamma = 268.4821 # cm-1, homogeneous broadening
     S = 0.09164 # Huang-Rhys parameter
     phi = 0 # rad; phase factor in Coulombic coupling term
+    params = Evals + [Espace, sigma, gamma, S, phi]
     
     # Number of vibrational levels
     n_vib = 5
     
     # No. molecules composing aggregate
     # (Assuming a cubic lattice "box" structure)
-    nWidth, nLength, nHeight = 1, 5, 2 # molecules
+    nWidth, nLength, nHeight = 2, 20, 5 # molecules
     
     # Distance between molecular COM's from G4 in THF / H20 XRD data.
     # (Geometric values written w.r.t. monoclinic xtal structure.)
@@ -334,21 +350,53 @@ def main():
     # Loads and processes experimental spectra
     wn_abs, exp_spec_mon, exp_spec_agg = load_and_process_spectra(G4monomer, G4aggregate)
     #plot_experimental_spectra(wn_abs, exp_spec_mon, exp_spec_agg)
-
-    # Initializes positions and relative angles between all molecules.
-    posVec = generate_lattice(nWidth, nLength, nHeight, aDist, bDist, molHeight)
-    thetaVals = compute_theta_matrix(posVec, nMonomers, len(Evals))
-    plot_theta_map(thetaVals, nMonomers, Btransition=0)
-
+    
     # Initializes the spectrum simulation.
-    params = Evals + [Espace, sigma, gamma, S, phi]
-    SimSpectra, energies, osc_strength, eta, Jarray = generate_spec_aggregate(
+    addDisorder = True
+    nSimulations = 10
+    
+    if addDisorder==True:
+        # Binary value to turn on / off disorder in the positions
+        posVecDisorder=True
+        
+        # Binary value to turn on / off disorder in the TDM angle
+        thetaVecDisorder=True
+        
+        # Executes the simulations
+        spectra = []
+        for _ in range(nSimulations):
+            # Initializes positions of all molecules.
+            posVec = generate_lattice(nWidth, nLength, nHeight, aDist, bDist, molHeight, posVecDisorder)
+            
+            # Initializes relative angles between all molecules
+            thetaVals = compute_theta_matrix(posVec, nMonomers, len(Evals), thetaVecDisorder)
+            
+            # Executes one simulation with the set positions / TDM angles
+            spec, *_ = generate_spec_aggregate(params, wn_abs, len(Evals), n_vib, nMonomers, posVec, thetaVals)
+            spectra.append(spec)
+            
+        # Ensemble average over all simulations    
+        SimSpectra = np.mean(spectra, axis=0)
+        
+        # Plots the averaged simulated spectrum
+        plot_simulation_results(wn_abs, exp_spec_mon, exp_spec_agg, SimSpectra, f"{nWidth} x {nLength} x {nHeight}")
+        
+        
+    else:
+        # Initializes positions of all molecules.
+        posVec = generate_lattice(nWidth, nLength, nHeight, aDist, bDist, molHeight, posVecDisorder=False)
+        
+        # Initializes relative angles between all molecules
+        thetaVals = compute_theta_matrix(posVec, nMonomers, len(Evals), thetaVecDisorder=False)
+        plot_theta_map(thetaVals, nMonomers, Btransition=0)
+        
+        # Executes the simulation
+        SimSpectra, energies, osc_strength, eta, Jarray = generate_spec_aggregate(
         params, wn_abs, len(Evals), n_vib, nMonomers, posVec, thetaVals)
-
-    # Plots the simulated spectrum and coupling matrix.
-    plot_simulation_results(wn_abs, exp_spec_mon, exp_spec_agg, SimSpectra, f"{nWidth} x {nLength} x {nHeight}")
-    plot_J_matrix(Jarray, nMonomers, Btransition=0)
-
+        
+        # Plots the simulated spectrum and coupling matrix.
+        plot_simulation_results(wn_abs, exp_spec_mon, exp_spec_agg, SimSpectra, f"{nWidth} x {nLength} x {nHeight}")
+        plot_J_matrix(Jarray, nMonomers, Btransition=0)
 
 if __name__ == "__main__":
     main()
