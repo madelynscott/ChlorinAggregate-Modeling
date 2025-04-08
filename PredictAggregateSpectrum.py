@@ -89,7 +89,7 @@ def compute_theta_matrix(posVec, tdm_vectors, thetaVecDisorder=True):
         # of 5 degrees (~0.087 rad)
         angle_disorder_deg = 5
         angle_disorder_rad = np.deg2rad(angle_disorder_deg)
-        thetaVals = thetaVals + np.random.normal(0, angle_disorder_rad, 
+        thetaVals += np.random.normal(0, angle_disorder_rad, 
                                                  size=thetaVals.shape)
     else:
         pass
@@ -349,7 +349,7 @@ def main():
     # (Assuming a cubic lattice "box" structure)
     nWidth, nLength, nHeight = 7, 10, 6 # molecules
     
-    # Distance between molecular COM's from G4 in THF / H20 XRD data.
+    # Distance between molecular COM's from single xtal G4 in THF / H20 XRD data.
     # (Geometric values written w.r.t. monoclinic xtal structure.)
     aDist = 8.5616 # angstroms; length a measurement: 8.5616(13) 
     bDist = 6.2654 # angstroms; length b measurement: 6.2654(8)
