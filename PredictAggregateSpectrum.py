@@ -31,74 +31,75 @@ def load_and_process_spectra(G4monomer, G4aggregate):
     return wn_abs, exp_spec_mon, exp_spec_agg
 
 
-def generate_lattice(nWidth, nLength, nHeight, aDist, bDist, molHeight, posVecDisorder=True):
-    # Number of monomers in the aggregate structure
+def generate_lattice(nWidth, nLength, nHeight, aDist, bDist, molHeight, 
+                     posVecDisorder=True, slip_x_frac=0.0, slip_y_frac=0.0):
+
+    # Builds a lattice of monomer positions with optional slip-stacking and Gaussian disorder.
+
+    # Returns:
+        # posVec: (3, N) array of center-of-mass positions in angstroms
+
     nMonomers = nWidth * nLength * nHeight
-    
-    # No. of molecule in each "sheet" of the lattice
-    nLayer = nMonomers // nHeight
-    
-    # COM coordinates for each molecule within the crystal.
-    # index 1: [x y z], in angstroms
-    # index 2: number of monomers 
     posVec = np.zeros((3, nMonomers))
 
-    # Sets the x-coordinates of the first "sheet" of monomers
-    for ww in range(0, nLayer, nWidth):
-        wRng = slice(ww, ww + nWidth)
-        posVec[0, wRng] = (ww // nWidth) * aDist
+    index = 0
+    for z in range(nHeight):
+        for y in range(nLength):
+            for x in range(nWidth):
+                # Add geometric stacking
+                px = x * aDist + z * slip_x_frac * aDist
+                py = y * bDist + z * slip_y_frac * bDist
+                pz = z * molHeight
+                posVec[:, index] = [px, py, pz]
+                index += 1
 
-    # Sets the y-coordinates of the first "sheet" of monomers
-    indY = np.mod(np.arange(nLayer), nLength)
-    indY = np.roll(indY, -2)
-    posVec[1, :nLayer] = indY * bDist
-
-    # Replicates the x- and y- coordinates to all other "sheets" in the
-    # lattice and sets appropriate z-coordinates for all monomers
-    for ss in range(nLayer, nMonomers, nLayer):
-        posVec[0, ss:ss + nLayer] = posVec[0, :nLayer]
-        posVec[1, ss:ss + nLayer] = posVec[1, :nLayer]
-        zInd = (ss + nLayer - 1) // nLayer - 1
-        posVec[2, ss:ss + nLayer] = zInd * molHeight
-        
+    # Add static positional disorder (Gaussian-distributed)
     if posVecDisorder==True:
         disorder_std = 0.3  # in angstroms
-        posVec = posVec + np.random.normal(0, disorder_std, size=posVec.shape)
+        posVec += np.random.normal(0, disorder_std, size=posVec.shape)
     else:
-        pass    
+        pass
 
     return posVec
 
 
-def compute_theta_matrix(posVec, nMonomers, nEvals, thetaVecDisorder=True):
-    # Creates matrix of theta TDM relative angle inputs.
-    # Indices: [molecule #, molecule #, Bx/y TDM]
+def compute_theta_matrix(posVec, tdm_vectors, thetaVecDisorder=True):
+    # Computes theta angle between transition dipole vectors and intermolecular axis.
+    # Returns a 3D array: [i, j, polarization axis (e.g., Bx/By)]
+    
+    nMonomers = posVec.shape[1]
+    nEvals = tdm_vectors.shape[2]  # one TDM vector per transition
+    
     thetaVals = np.zeros((nMonomers, nMonomers, nEvals))
-    for mm in range(nMonomers):
-        for nn in range(nMonomers):
-            # Coordinates of two molecules under investigation
-            x, y, z = posVec[:, nn] - posVec[:, mm]
-            
-            # Uses trigonometry to find relative TDM angle
-            theta_Bx = np.arctan2(y, x) # relative angle of Bx TDM
-            theta_By = np.pi / 2 + theta_Bx # relative angle of By TDM
-            
-            # Saves the angle values as matrix entries
-            thetaVals[mm, nn, 0] = theta_Bx
-            thetaVals[mm, nn, 1] = theta_By
+    
+    # Computes angle between TDMs of each monomer pair
+    for ee in range(nEvals):
+        for i in range(nMonomers):
+            for j in range(nMonomers):
+                if i == j:
+                    continue
+                R = posVec[:, j] - posVec[:, i]
+                R_hat = R / np.linalg.norm(R)
+                mu = tdm_vectors[:, i, ee]
+                theta = np.arccos(np.clip(np.dot(mu, R_hat), -1.0, 1.0))  # in radians
+                thetaVals[i, j, ee] = theta # angle between mu and R
             
     if thetaVecDisorder==True:
-        # Add Gaussian angular noise with std deviation of 5 degrees (~0.087 rad)
-        angle_disorder_deg = 10
+        # Add Gaussian-distributed angular noise with std deviation 
+        # of 5 degrees (~0.087 rad)
+        angle_disorder_deg = 5
         angle_disorder_rad = np.deg2rad(angle_disorder_deg)
-        thetaVals = thetaVals + np.random.normal(0, angle_disorder_rad, size=thetaVals.shape)
+        thetaVals = thetaVals + np.random.normal(0, angle_disorder_rad, 
+                                                 size=thetaVals.shape)
     else:
         pass
         
     return np.nan_to_num(thetaVals)
 
 
-def generate_spec_aggregate(params, omega_cm, nEvals, n_vib, nMonomers, posVec, thetaVals):
+def generate_spec_aggregate(params, omega_cm, nEvals, n_vib, nMonomers, posVec, 
+                            thetaVals):
+    
     E_central = params[:nEvals] # Excited state energies in cm^-1
     E_vib = params[nEvals] # Vibrational progression energy in cm^-1
     sigma_cm = params[nEvals + 1] # Inhomogeneous broadening FWHM in cm^-1
@@ -119,11 +120,12 @@ def generate_spec_aggregate(params, omega_cm, nEvals, n_vib, nMonomers, posVec, 
     # (To find numerical magnitude, need to calculate from DFT... but since 
     # it won't influence spectra after normalization, just assume it 
     # to be arbitrary value for now.)
-    mu01 = 1  # Debye; (symmetric porphyrins typically < 1 D)
+    mu01 = 1.0  # Debye; (symmetric porphyrins typically < 1 D)
     mu01 = (1 / cLight) * 1e-21 * mu01  # Convert to C·m
 
     # Franck-Condon overlap integrals
-    FC_factors = np.array([(-1)**n * np.exp(-S/2) * S**(n/2) / np.sqrt(factorial(n)) for n in range(n_vib + 1)])
+    FC_factors = np.array([(-1)**n * np.exp(-S/2) * S**(n/2) / 
+                           np.sqrt(factorial(n)) for n in range(n_vib + 1)])
     FC_factors = np.tile(FC_factors, nMonomers)
 
     # Initialize arrays for: spectrum, energy, oscillator strength, coupling
@@ -166,7 +168,8 @@ def generate_spec_aggregate(params, omega_cm, nEvals, n_vib, nMonomers, posVec, 
                 theta = thetaVals[mm, nn, ee]
                 
                 # Determines Coulombic coupling from relative TDM orientation angle
-                J = mu01**2 * (1 - 3 * np.cos(theta)**2) / (4 * np.pi * epsilon * Rcom**3) # C⋅V = Joule
+                J = mu01**2 * (1 - 3 * np.cos(theta)**2
+                               ) / (4 * np.pi * epsilon * Rcom**3) # C⋅V = Joule
                 J = J / (hPlanck * cLight) # unit of cm-1; 1 cm-1 = E / hc
 
                 # Saves the matrix element of the coupling matrix
@@ -180,7 +183,8 @@ def generate_spec_aggregate(params, omega_cm, nEvals, n_vib, nMonomers, posVec, 
                         idx_nn = jj + nn * (n_vib + 1) 
 
                         # Coulombic coupling value
-                        val = J * FC_factors[ii + mm * (n_vib + 1)] * FC_factors[jj + nn * (n_vib + 1)]
+                        val = J * FC_factors[ii + mm * (n_vib + 1)
+                                             ] * FC_factors[jj + nn * (n_vib + 1)]
                         H[idx_mm, idx_nn] = val * np.exp(1j * phi) # Upper triangular components
                         H[idx_nn, idx_mm] = val * np.exp(-1j * phi) # Lower triangular components
 
@@ -201,7 +205,8 @@ def generate_spec_aggregate(params, omega_cm, nEvals, n_vib, nMonomers, posVec, 
     # parameters from the monomer fit.
     for k in range(len(energies)):
         # Creates and normalizes the inhomogeneous broadening component
-        GaussianProf = np.exp(-(omega_cm - energies[k])**2 / (2 * sigma_cm**2)) / (np.sqrt(2 * np.pi) * sigma_cm)
+        GaussianProf = np.exp(-(omega_cm - energies[k])**2 / 
+                              (2 * sigma_cm**2)) / (np.sqrt(2 * np.pi) * sigma_cm)
         
         # Creates and normalizes the homogeneous broadening component
         LorentzianProf = gamma_cm / ((omega_cm - energies[k])**2 + gamma_cm**2) / np.pi
@@ -241,7 +246,8 @@ def plot_theta_map(thetaVals, nMonomers, Btransition=1):
     nMonomers = thetaVals.shape[0]
     xq, yq = np.meshgrid(np.arange(nMonomers), np.arange(nMonomers))
     plt.figure(figsize=(6, 5))
-    plt.pcolormesh(xq, yq, np.degrees(thetaVals[:, :, Btransition]), shading='auto', vmin=0, vmax=360)
+    plt.pcolormesh(xq, yq, np.degrees(thetaVals[:, :, Btransition]), 
+                   shading='auto', vmin=0, vmax=360)
     cbar=plt.colorbar(label='Relative TDM Angle (degrees)')
     cbar.set_ticks(np.arange(0,360+1,60))
     plt.xlabel('Monomer Index')
@@ -260,7 +266,8 @@ def plot_theta_map(thetaVals, nMonomers, Btransition=1):
     plt.show()
 
 
-def plot_simulation_results(wn_abs, exp_spec_mon, exp_spec_agg, SimSpectra, lattice_shape):
+def plot_simulation_results(wn_abs, exp_spec_mon, exp_spec_agg, SimSpectra, 
+                            lattice_shape):
     plt.figure(figsize=(6, 3))
     plt.plot(wn_abs, exp_spec_mon, 'red', label='Monomer (Expt.)')
     plt.plot(wn_abs, exp_spec_agg, 'blue', label='Aggregate (Expt.)')
@@ -279,7 +286,8 @@ def plot_J_matrix(Jarray, nMonomers, Btransition=1):
     nMonomers = Jarray.shape[0]
     xq, yq = np.meshgrid(np.arange(nMonomers), np.arange(nMonomers))
     plt.figure(figsize=(6, 5))
-    plt.pcolormesh(xq, yq, Jarray[:, :, Btransition], shading='auto', cmap='coolwarm', vmin=-300, vmax=300)
+    plt.pcolormesh(xq, yq, Jarray[:, :, Btransition], shading='auto', 
+                   cmap='coolwarm', vmin=-300, vmax=300)
     cbar=plt.colorbar(label='J (Coulombic coupling, cm$^{-1}$)')
     cbar.set_ticks(np.arange(-300,300+1,100))
     plt.xlabel('Monomer Index')
@@ -293,7 +301,8 @@ def plot_J_matrix(Jarray, nMonomers, Btransition=1):
     plt.xticks(tick_positions, tick_labels)  
     plt.yticks(tick_positions, tick_labels)
     
-    plt.title('Coulombic Coupling: B_y' if Btransition == 1 else 'Coulombic Coupling: B_x')
+    plt.title('Coulombic Coupling: B_y' if Btransition == 1 
+              else 'Coulombic Coupling: B_x')
     plt.tight_layout()
     plt.show()
 
@@ -316,11 +325,13 @@ def main():
 
 
     # === Parameters ===
+    
+    # Change 'dataFiles' path to match location on local drive
     dataFiles = np.load(r'C:\Users\madel\Documents\MIT\Schlau-Cohen group\Research foci\Chlorins\Modelling absorption spectra\20250304 - converting code to Python\G4AbsorptionData.npz')
     G4monomer = dataFiles['G4monomer']
     G4aggregate = dataFiles['G4aggregate']
     
-    # Hand-pick electronic energy transitions (E00, E01, ... )
+    # Hand-picked electronic energy transitions (E00, E01, ... )
     Evals = [23866.3, 23866.3] # cm-1; degenerate B x/y transitions
     
     # From the fit of the monomer absorption spectrum:
@@ -336,58 +347,96 @@ def main():
     
     # No. molecules composing aggregate
     # (Assuming a cubic lattice "box" structure)
-    nWidth, nLength, nHeight = 2, 20, 5 # molecules
+    nWidth, nLength, nHeight = 7, 10, 6 # molecules
     
     # Distance between molecular COM's from G4 in THF / H20 XRD data.
     # (Geometric values written w.r.t. monoclinic xtal structure.)
     aDist = 8.5616 # angstroms; length a measurement: 8.5616(13) 
     bDist = 6.2654 # angstroms; length b measurement: 6.2654(8)
     cDist = 26.976 # angstroms; length c measurement: 26.976(4)
+    
     # molHeight = 11.3 # angstroms; approximated from molecular cell volume
     molHeight = 3.374 # angstroms; approximated mon-mon pi-stacking distance
+    
     nMonomers = nWidth * nLength * nHeight # number of monomers in the aggregate
 
     # Loads and processes experimental spectra
     wn_abs, exp_spec_mon, exp_spec_agg = load_and_process_spectra(G4monomer, G4aggregate)
-    #plot_experimental_spectra(wn_abs, exp_spec_mon, exp_spec_agg)
     
     # Initializes the spectrum simulation.
     addDisorder = True
-    nSimulations = 10
+    
+    # No. initializes of disorder in system (i.e., invidual components over 
+    # which ensemble average will be taken)
+    # Note: Code as is runs slowly with physically relevant systems (~400-600 molecules)
+    #       ... could consider parallelizing and / or rewriting sections for speed?
+    nSimulations = 3 # 3 simulations: ~5 minutes for 400-500 molecules
+    
+    # Initializes array of TDM vectors
+    # Shape: (3, nMonomers, nEvals) → [x / y / z, monomer index, Bx / By]
+    tdm_vectors = np.zeros((3, nMonomers, 2))
+    tdm_vectors[0, :, 0] = 1.0  # Bx polarization → along x
+    tdm_vectors[1, :, 1] = 1.0  # By polarization → along y    
     
     if addDisorder==True:
+        
         # Binary value to turn on / off disorder in the positions
         posVecDisorder=True
         
-        # Binary value to turn on / off disorder in the TDM angle
+        # Slip-stacking offsets in x- / y-dimensions
+        # (Unitless fractional values ​​relative to the unit cell dimensions)
+        # Typical values:
+        #    Ideal, 0 (No slip, perfect vertical stacking)
+        #    Brick-work packing, 0.2 – 0.5 (Offset rows like bricks, 2–4 Å)
+        #    Slipped cofacial, ~0.3 (Most common π–π stacking, ~3 Å)
+        #    Strong slip, 0.6 - 1.0 (Large offset gold J-type tendencies, >5 Å)
+        slip_x_frac = 0.0
+        slip_y_frac = 0.3
+        
+        # Binary value to turn on / off angular disorder in the TDM
         thetaVecDisorder=True
         
         # Executes the simulations
         spectra = []
         for _ in range(nSimulations):
             # Initializes positions of all molecules.
-            posVec = generate_lattice(nWidth, nLength, nHeight, aDist, bDist, molHeight, posVecDisorder)
+            posVec = generate_lattice(nWidth, nLength, nHeight, aDist, bDist, 
+                                      molHeight, posVecDisorder, slip_x_frac, slip_y_frac)
             
             # Initializes relative angles between all molecules
-            thetaVals = compute_theta_matrix(posVec, nMonomers, len(Evals), thetaVecDisorder)
+            thetaVals = compute_theta_matrix(posVec, tdm_vectors, thetaVecDisorder)
             
             # Executes one simulation with the set positions / TDM angles
-            spec, *_ = generate_spec_aggregate(params, wn_abs, len(Evals), n_vib, nMonomers, posVec, thetaVals)
+            spec, *_ = generate_spec_aggregate(params, wn_abs, len(Evals), 
+                                               n_vib, nMonomers, posVec, thetaVals)
             spectra.append(spec)
             
         # Ensemble average over all simulations    
         SimSpectra = np.mean(spectra, axis=0)
         
         # Plots the averaged simulated spectrum
-        plot_simulation_results(wn_abs, exp_spec_mon, exp_spec_agg, SimSpectra, f"{nWidth} x {nLength} x {nHeight}")
+        plot_simulation_results(wn_abs, exp_spec_mon, exp_spec_agg, 
+                                SimSpectra, f"{nWidth} x {nLength} x {nHeight}")
         
         
     else:
+        # Binary value to turn on / off disorder in the positions
+        posVecDisorder=False
+        
         # Initializes positions of all molecules.
-        posVec = generate_lattice(nWidth, nLength, nHeight, aDist, bDist, molHeight, posVecDisorder=False)
+        posVec = generate_lattice(nWidth, nLength, nHeight, aDist, bDist, 
+                                  molHeight, posVecDisorder, slip_x_frac, slip_y_frac)
+        
+        # Slip-stacking offsets in x- / y-dimensions
+        # (Unitless fractional values ​​relative to the unit cell dimensions)
+        slip_x_frac = 0.0
+        slip_y_frac = 0.0
+        
+        # Binary value to turn on / off angular disorder in the TDM
+        thetaVecDisorder=False
         
         # Initializes relative angles between all molecules
-        thetaVals = compute_theta_matrix(posVec, nMonomers, len(Evals), thetaVecDisorder=False)
+        thetaVals = compute_theta_matrix(posVec, tdm_vectors, thetaVecDisorder)
         plot_theta_map(thetaVals, nMonomers, Btransition=0)
         
         # Executes the simulation
@@ -395,7 +444,8 @@ def main():
         params, wn_abs, len(Evals), n_vib, nMonomers, posVec, thetaVals)
         
         # Plots the simulated spectrum and coupling matrix.
-        plot_simulation_results(wn_abs, exp_spec_mon, exp_spec_agg, SimSpectra, f"{nWidth} x {nLength} x {nHeight}")
+        plot_simulation_results(wn_abs, exp_spec_mon, exp_spec_agg, 
+                                SimSpectra, f"{nWidth} x {nLength} x {nHeight}")
         plot_J_matrix(Jarray, nMonomers, Btransition=0)
 
 if __name__ == "__main__":
